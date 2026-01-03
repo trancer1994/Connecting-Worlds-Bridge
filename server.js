@@ -135,9 +135,10 @@ ttState.currentChannelPath = "/";
 ttState.currentChannelId = 1;
 const joinCmd = `join chanid=1\r\n`;
 ttSocket.write(joinCmd);
+});   // <-- THIS closes the net.createConnection callback
 
-      // Handle TeamTalk server messages
-      ttSocket.on("data", (chunk) => {
+// Handle TeamTalk server messages
+ttSocket.on("data", (chunk) => {
         const text = chunk.toString("utf8");
         console.log("TeamTalk server says:", text);
 
@@ -397,3 +398,4 @@ function parseTeamTalkLine(line, ttState, sendToClient) {
     return;
   }
 }
+
