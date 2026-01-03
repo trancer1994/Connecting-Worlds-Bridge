@@ -72,6 +72,8 @@ wss.on("connection", (socket) => {
     if (data.type === "tt-handshake") {
       console.log("TeamTalk handshake request:", data);
 
+      const { ttHost, ttPort, username, password, channel } = data;
+
       // Notify client
       socket.send(JSON.stringify({
         type: "tt-status",
@@ -80,10 +82,7 @@ wss.on("connection", (socket) => {
       }));
 
       // Create TCP connection to TeamTalk server
-      ttSocket = net.createConnection({
-        host: data.ttHost,
-        port: data.ttPort
-      }, () => {
+      ttSocket = net.createConnection({ host: ttHost, port: ttPort }, () => {
         console.log("Connected to TeamTalk server");
 
         socket.send(JSON.stringify({
@@ -92,25 +91,31 @@ wss.on("connection", (socket) => {
           message: "Connected to TeamTalk server."
         }));
 
-        // Send TeamTalk login packet
-        const loginPacket =
-          `<login username="${data.username}" ` +
-          `password="${data.password}" ` +
-          `nickname="${data.username}" ` +
-          `clientname="ConnectingWorlds" />\n`;
+        // CORRECT TeamTalk login text command
+        const loginCmd =
+          `login username="${username}" ` +
+          `password="${password}" ` +
+          `protocol="5.14" ` +
+          `clientname="ConnectingWorlds"\r\n`;
 
-        ttSocket.write(loginPacket);
+        ttSocket.write(loginCmd);
 
         socket.send(JSON.stringify({
           type: "tt-status",
           phase: "login-sent",
           message: "Sent TeamTalk login packet."
         }));
+
+        // Optional: auto-join a channel
+        if (channel && channel.trim() !== "") {
+          const joinCmd = `join channel="${channel}"\r\n`;
+          ttSocket.write(joinCmd);
+        }
       });
 
       // Handle TeamTalk server messages
       ttSocket.on("data", (chunk) => {
-        const text = chunk.toString();
+        const text = chunk.toString("utf8");
         console.log("TeamTalk server says:", text);
 
         socket.send(JSON.stringify({
@@ -118,6 +123,14 @@ wss.on("connection", (socket) => {
           phase: "server-message",
           raw: text
         }));
+
+        if (text.includes("error")) {
+          socket.send(JSON.stringify({
+            type: "tt-status",
+            phase: "error",
+            message: "TeamTalk server returned an error."
+          }));
+        }
       });
 
       ttSocket.on("close", () => {
