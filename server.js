@@ -1,6 +1,8 @@
 const WebSocket = require("ws");
 
-const wss = new WebSocket.Server({ port: 8080 });
+// Use Render's assigned port, or 8080 locally
+const port = process.env.PORT || 8080;
+const wss = new WebSocket.Server({ port });
 
 const clients = new Set();
 
@@ -24,9 +26,7 @@ wss.on("connection", (socket) => {
 
     console.log("Received:", data);
 
-    // Handle AAC text or generic chat
     if (data.type === "aac_text" || data.type === "chat") {
-      // Broadcast to all connected web clients
       for (const client of clients) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
@@ -36,11 +36,7 @@ wss.on("connection", (socket) => {
           }));
         }
       }
-
-      // Later: forward to Python TeamTalk bot
     }
-
-    // Later: handle WebRTC signaling here
   });
 
   socket.on("close", () => {
@@ -54,7 +50,4 @@ wss.on("connection", (socket) => {
   });
 });
 
-console.log("Connecting Worlds bridge server listening on ws://localhost:8080");
-
-
-// test commit
+console.log(`Connecting Worlds bridge server listening on port ${port}`);
