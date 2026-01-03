@@ -130,11 +130,11 @@ wss.on("connection", (socket) => {
         });
 
         // Auto-join root channel if requested or default
-        const autoChannel = channel && channel.trim() !== "" ? channel : "/";
-        ttState.currentChannelPath = autoChannel;
-        const joinCmd = `join channel="${autoChannel}"\r\n`;
-        ttSocket.write(joinCmd);
-      });
+// Auto-join root channel by ID
+ttState.currentChannelPath = "/";
+ttState.currentChannelId = 1;
+const joinCmd = `join chanid=1\r\n`;
+ttSocket.write(joinCmd);
 
       // Handle TeamTalk server messages
       ttSocket.on("data", (chunk) => {
@@ -230,11 +230,22 @@ wss.on("connection", (socket) => {
         return;
       }
 
-      const channelPath = data.channel || "/";
-      ttState.currentChannelPath = channelPath;
+const channelPath = data.channel || "/";
+ttState.currentChannelPath = channelPath;
 
-      const joinCmd = `join channel="${channelPath}"\r\n`;
-      ttSocket.write(joinCmd);
+// Find channel ID by path
+let chanidToJoin = 1;
+for (const ch of Object.values(ttState.channels)) {
+  if (ch.path === channelPath) {
+    chanidToJoin = ch.id;
+    break;
+  }
+}
+
+ttState.currentChannelId = chanidToJoin;
+
+const joinCmd = `join chanid=${chanidToJoin}\r\n`;
+ttSocket.write(joinCmd);
 
       sendToClient({
         type: "tt-status",
@@ -291,33 +302,46 @@ console.log(`Connecting Worlds bridge server listening on port ${port}`);
 // TeamTalk line parser
 // ==============================
 function parseTeamTalkLine(line, ttState, sendToClient) {
-  // Simple key="value" parser
-  function extractField(name) {
+  // Helper: key="value"
+  function extractFieldQuoted(name) {
     const regex = new RegExp(`${name}="([^"]*)"`);
     const m = line.match(regex);
     return m ? m[1] : null;
   }
 
-  if (line.startsWith("addchannel ")) {
-    const chanid = parseInt(extractField("chanid"), 10);
-    const parentid = parseInt(extractField("parentid"), 10);
-    const path = extractField("channel") || "/";
-    const name = extractField("name") || path;
+  // Helper: key=123
+  function extractFieldNumber(name) {
+    const regex = new RegExp(`${name}=([0-9]+)`);
+    const m = line.match(regex);
+    return m ? parseInt(m[1], 10) : null;
+  }
 
-    ttState.channels[chanid] = {
-      id: chanid,
-      name,
-      path,
-      parentId: parentid
-    };
+  if (line.startsWith("addchannel ")) {
+    const chanid = extractFieldNumber("chanid");
+    const parentid = extractFieldNumber("parentid");
+    const path = extractFieldQuoted("channel") || "/";
+    const name = extractFieldQuoted("name") || path;
+
+    if (chanid != null) {
+      ttState.channels[chanid] = {
+        id: chanid,
+        name,
+        path,
+        parentId: parentid
+      };
+    }
     return;
   }
 
   if (line.startsWith("adduser ")) {
-    const userid = parseInt(extractField("userid"), 10);
-    const nickname = extractField("nickname") || extractField("username") || "user";
-    const username = extractField("username") || "user";
-    const chanid = parseInt(extractField("chanid") || "0", 10);
+    const userid = extractFieldNumber("userid");
+    if (userid == null) return;
+
+    const nickname = extractFieldQuoted("nickname") ||
+                     extractFieldQuoted("username") ||
+                     "user";
+    const username = extractFieldQuoted("username") || "user";
+    const chanid = extractFieldNumber("chanid") ?? 0;
 
     ttState.users[userid] = {
       id: userid,
@@ -329,24 +353,30 @@ function parseTeamTalkLine(line, ttState, sendToClient) {
   }
 
   if (line.startsWith("userupdate ")) {
-    const userid = parseInt(extractField("userid"), 10);
-    if (ttState.users[userid]) {
-      const chanid = parseInt(extractField("chanid") || `${ttState.users[userid].channelId}`, 10);
-      ttState.users[userid].channelId = chanid;
+    const userid = extractFieldNumber("userid");
+    if (userid != null && ttState.users[userid]) {
+      const chanid = extractFieldNumber("chanid");
+      if (chanid != null) {
+        ttState.users[userid].channelId = chanid;
+      }
     }
     return;
   }
 
   if (line.startsWith("removeuser ")) {
-    const userid = parseInt(extractField("userid"), 10);
-    delete ttState.users[userid];
+    const userid = extractFieldNumber("userid");
+    if (userid != null) {
+      delete ttState.users[userid];
+    }
     return;
   }
 
   if (line.startsWith("chanmsg ")) {
-    const fromNick = extractField("nickname") || extractField("username") || "someone";
-    const channel = extractField("channel") || "/";
-    const text = extractField("text") || "";
+    const fromNick = extractFieldQuoted("nickname") ||
+                     extractFieldQuoted("username") ||
+                     "someone";
+    const channel = extractFieldQuoted("channel") || "/";
+    const text = extractFieldQuoted("text") || "";
 
     sendToClient({
       type: "tt-chat",
@@ -357,9 +387,8 @@ function parseTeamTalkLine(line, ttState, sendToClient) {
     return;
   }
 
-  // Optionally detect when we've joined a channel (if TT sends such a line)
   if (line.startsWith("joined ")) {
-    const channel = extractField("channel") || "/";
+    const channel = extractFieldQuoted("channel") || "/";
     ttState.currentChannelPath = channel;
     sendToClient({
       type: "tt-current-channel",
