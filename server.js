@@ -19,6 +19,29 @@ wss.on("connection", (socket) => {
 
   let ttSocket = null; // TeamTalk TCP socket
 
+  // Per-connection TeamTalk state (for this WebSocket client)
+  const ttState = {
+    channels: {},          // chanid -> { id, name, path, parentId }
+    users: {},             // userid -> { id, nickname, username, channelId }
+    currentChannelPath: "/", // Default to root
+  };
+
+  function sendToClient(obj) {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(obj));
+    }
+  }
+
+  function broadcastChannels() {
+    const channels = Object.values(ttState.channels);
+    sendToClient({ type: "tt-channel-list", channels });
+  }
+
+  function broadcastUsers() {
+    const users = Object.values(ttState.users);
+    sendToClient({ type: "tt-user-list", users });
+  }
+
   socket.on("message", (raw) => {
     let data;
     try {
@@ -43,13 +66,13 @@ wss.on("connection", (socket) => {
         connectedAt: Date.now()
       };
 
-      socket.send(JSON.stringify({
+      sendToClient({
         type: "handshake-ack",
         status: "ok",
         protocol: 1,
         message: "Handshake received. Ready for TeamTalk connection.",
         serverTime: Date.now()
-      }));
+      });
 
       return;
     }
@@ -58,11 +81,11 @@ wss.on("connection", (socket) => {
     // 2. PING / PONG
     // -------------------------------
     if (data.type === "ping") {
-      socket.send(JSON.stringify({
+      sendToClient({
         type: "pong",
         sentAt: data.timestamp || Date.now(),
         serverTime: Date.now()
-      }));
+      });
       return;
     }
 
@@ -74,43 +97,43 @@ wss.on("connection", (socket) => {
 
       const { ttHost, ttPort, username, password, channel } = data;
 
-      // Notify client
-      socket.send(JSON.stringify({
+      sendToClient({
         type: "tt-status",
         phase: "received",
         message: "TeamTalk handshake request received. Connecting..."
-      }));
+      });
 
       // Create TCP connection to TeamTalk server
       ttSocket = net.createConnection({ host: ttHost, port: ttPort }, () => {
         console.log("Connected to TeamTalk server");
 
-        socket.send(JSON.stringify({
+        sendToClient({
           type: "tt-status",
           phase: "connected",
           message: "Connected to TeamTalk server."
-        }));
+        });
 
         // CORRECT TeamTalk login text command
         const loginCmd =
           `login username="${username}" ` +
           `password="${password}" ` +
+          `nickname="${username}" ` +
           `protocol="5.14" ` +
           `clientname="ConnectingWorlds"\r\n`;
 
         ttSocket.write(loginCmd);
 
-        socket.send(JSON.stringify({
+        sendToClient({
           type: "tt-status",
           phase: "login-sent",
           message: "Sent TeamTalk login packet."
-        }));
+        });
 
-        // Optional: auto-join a channel
-        if (channel && channel.trim() !== "") {
-          const joinCmd = `join channel="${channel}"\r\n`;
-          ttSocket.write(joinCmd);
-        }
+        // Auto-join root channel if requested or default
+        const autoChannel = channel && channel.trim() !== "" ? channel : "/";
+        ttState.currentChannelPath = autoChannel;
+        const joinCmd = `join channel="${autoChannel}"\r\n`;
+        ttSocket.write(joinCmd);
       });
 
       // Handle TeamTalk server messages
@@ -118,46 +141,112 @@ wss.on("connection", (socket) => {
         const text = chunk.toString("utf8");
         console.log("TeamTalk server says:", text);
 
-        socket.send(JSON.stringify({
+        // Send raw text for debugging
+        sendToClient({
           type: "tt-status",
           phase: "server-message",
           raw: text
-        }));
+        });
 
-        if (text.includes("error")) {
-          socket.send(JSON.stringify({
-            type: "tt-status",
-            phase: "error",
-            message: "TeamTalk server returned an error."
-          }));
+        // Parse line-by-line
+        const lines = text.split("\r\n").filter(l => l.trim().length > 0);
+        for (const line of lines) {
+          parseTeamTalkLine(line, ttState, sendToClient);
         }
+
+        // After processing, broadcast updated channels/users
+        broadcastChannels();
+        broadcastUsers();
       });
 
       ttSocket.on("close", () => {
         console.log("TeamTalk connection closed");
 
-        socket.send(JSON.stringify({
+        sendToClient({
           type: "tt-status",
           phase: "disconnected",
           message: "Disconnected from TeamTalk server."
-        }));
+        });
       });
 
       ttSocket.on("error", (err) => {
         console.error("TeamTalk socket error:", err);
 
-        socket.send(JSON.stringify({
+        sendToClient({
           type: "tt-status",
           phase: "error",
           message: err.message
-        }));
+        });
       });
 
       return;
     }
 
     // -------------------------------
-    // 4. CHAT / AAC TEXT BROADCAST
+    // 4. TEAMTALK CHAT FROM UI
+    // -------------------------------
+    if (data.type === "tt-chat") {
+      if (!ttSocket) {
+        sendToClient({
+          type: "tt-status",
+          phase: "error",
+          message: "Not connected to TeamTalk."
+        });
+        return;
+      }
+
+      const text = (data.text || "").trim();
+      if (!text) return;
+
+      const targetChannel = data.channel || ttState.currentChannelPath || "/";
+
+      // Simple escaping of double quotes in text
+      const safeText = text.replace(/"/g, '\\"');
+
+      const cmd = `chanmsg channel="${targetChannel}" text="${safeText}"\r\n`;
+      ttSocket.write(cmd);
+
+      // Echo locally as chat
+      sendToClient({
+        type: "tt-chat",
+        from: "admin",
+        channel: targetChannel,
+        text
+      });
+
+      return;
+    }
+
+    // -------------------------------
+    // 5. TEAMTALK JOIN REQUEST FROM UI
+    // -------------------------------
+    if (data.type === "tt-join") {
+      if (!ttSocket) {
+        sendToClient({
+          type: "tt-status",
+          phase: "error",
+          message: "Not connected to TeamTalk."
+        });
+        return;
+      }
+
+      const channelPath = data.channel || "/";
+      ttState.currentChannelPath = channelPath;
+
+      const joinCmd = `join channel="${channelPath}"\r\n`;
+      ttSocket.write(joinCmd);
+
+      sendToClient({
+        type: "tt-status",
+        phase: "join-sent",
+        message: `Requested join of channel ${channelPath}`
+      });
+
+      return;
+    }
+
+    // -------------------------------
+    // 6. CHAT / AAC TEXT BROADCAST (WEB-ONLY)
     // -------------------------------
     if (data.type === "aac_text" || data.type === "chat") {
       for (const client of clients) {
@@ -179,12 +268,103 @@ wss.on("connection", (socket) => {
   socket.on("close", () => {
     console.log("Client disconnected");
     clients.delete(socket);
+    if (ttSocket) {
+      ttSocket.destroy();
+      ttSocket = null;
+    }
   });
 
   socket.on("error", (err) => {
     console.error("Socket error:", err);
     clients.delete(socket);
+    if (ttSocket) {
+      ttSocket.destroy();
+      ttSocket = null;
+    }
   });
 });
 
 console.log(`Connecting Worlds bridge server listening on port ${port}`);
+
+
+// ==============================
+// TeamTalk line parser
+// ==============================
+function parseTeamTalkLine(line, ttState, sendToClient) {
+  // Simple key="value" parser
+  function extractField(name) {
+    const regex = new RegExp(`${name}="([^"]*)"`);
+    const m = line.match(regex);
+    return m ? m[1] : null;
+  }
+
+  if (line.startsWith("addchannel ")) {
+    const chanid = parseInt(extractField("chanid"), 10);
+    const parentid = parseInt(extractField("parentid"), 10);
+    const path = extractField("channel") || "/";
+    const name = extractField("name") || path;
+
+    ttState.channels[chanid] = {
+      id: chanid,
+      name,
+      path,
+      parentId: parentid
+    };
+    return;
+  }
+
+  if (line.startsWith("adduser ")) {
+    const userid = parseInt(extractField("userid"), 10);
+    const nickname = extractField("nickname") || extractField("username") || "user";
+    const username = extractField("username") || "user";
+    const chanid = parseInt(extractField("chanid") || "0", 10);
+
+    ttState.users[userid] = {
+      id: userid,
+      nickname,
+      username,
+      channelId: chanid
+    };
+    return;
+  }
+
+  if (line.startsWith("userupdate ")) {
+    const userid = parseInt(extractField("userid"), 10);
+    if (ttState.users[userid]) {
+      const chanid = parseInt(extractField("chanid") || `${ttState.users[userid].channelId}`, 10);
+      ttState.users[userid].channelId = chanid;
+    }
+    return;
+  }
+
+  if (line.startsWith("removeuser ")) {
+    const userid = parseInt(extractField("userid"), 10);
+    delete ttState.users[userid];
+    return;
+  }
+
+  if (line.startsWith("chanmsg ")) {
+    const fromNick = extractField("nickname") || extractField("username") || "someone";
+    const channel = extractField("channel") || "/";
+    const text = extractField("text") || "";
+
+    sendToClient({
+      type: "tt-chat",
+      from: fromNick,
+      channel,
+      text
+    });
+    return;
+  }
+
+  // Optionally detect when we've joined a channel (if TT sends such a line)
+  if (line.startsWith("joined ")) {
+    const channel = extractField("channel") || "/";
+    ttState.currentChannelPath = channel;
+    sendToClient({
+      type: "tt-current-channel",
+      channel
+    });
+    return;
+  }
+}
