@@ -135,6 +135,12 @@ ttState.currentChannelPath = "/";
 ttState.currentChannelId = 1;
 const joinCmd = `join chanid=1\r\n`;
 ttSocket.write(joinCmd);
+// Start keepalive timer (ping every 30 seconds)
+ttState.keepalive = setInterval(() => {
+  if (ttSocket && !ttSocket.destroyed) {
+    ttSocket.write("ping\r\n");
+  }
+}, 30000);
 });   // <-- THIS closes the net.createConnection callback
 
 // Handle TeamTalk server messages
@@ -160,25 +166,37 @@ ttSocket.on("data", (chunk) => {
         broadcastUsers();
       });
 
-      ttSocket.on("close", () => {
-        console.log("TeamTalk connection closed");
+ttSocket.on("close", () => {
+  console.log("TeamTalk connection closed");
 
-        sendToClient({
-          type: "tt-status",
-          phase: "disconnected",
-          message: "Disconnected from TeamTalk server."
-        });
-      });
+  // Stop keepalive timer
+  if (ttState.keepalive) {
+    clearInterval(ttState.keepalive);
+    ttState.keepalive = null;
+  }
 
-      ttSocket.on("error", (err) => {
-        console.error("TeamTalk socket error:", err);
+  sendToClient({
+    type: "tt-status",
+    phase: "disconnected",
+    message: "Disconnected from TeamTalk server."
+  });
+});
 
-        sendToClient({
-          type: "tt-status",
-          phase: "error",
-          message: err.message
-        });
-      });
+ttSocket.on("error", (err) => {
+  console.error("TeamTalk socket error:", err);
+
+  // Stop keepalive timer
+  if (ttState.keepalive) {
+    clearInterval(ttState.keepalive);
+    ttState.keepalive = null;
+  }
+
+  sendToClient({
+    type: "tt-status",
+    phase: "error",
+    message: err.message
+  });
+});
 
       return;
     }
@@ -398,4 +416,5 @@ function parseTeamTalkLine(line, ttState, sendToClient) {
     return;
   }
 }
+
 
