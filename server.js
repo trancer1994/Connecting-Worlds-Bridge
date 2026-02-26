@@ -84,7 +84,20 @@ wss.on("connection", (socket) => {
       return;
     }
 
-    // -------------------------------
+ // -------------------------------
+// NEW: TEAMTALK CONNECT (frontend API)
+// -------------------------------
+if (data.type === "tt-connect") {
+  startTeamTalkConnection(clientInfo, {
+    ttHost: data.host,
+    ttPort: data.port,
+    username: data.username,
+    password: data.password
+  });
+  return;
+}
+ 
+   // -------------------------------
     // 4. TEAMTALK CHAT
     // -------------------------------
     if (data.type === "tt-chat") {
@@ -447,3 +460,4 @@ function parseTeamTalkLine(line, clientInfo) {
     return;
   }
 }
+
